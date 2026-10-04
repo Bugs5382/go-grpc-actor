@@ -1,6 +1,62 @@
-// Package grpcactor is Carry the signed-in user and the act-as admin across gRPC service hops, trusted only from authenticated internal callers.
+// Package grpcactor carries the signed-in user, and during act-as the real
+// admin behind them, across gRPC service hops, and trusts it only from
+// authenticated internal callers.
 //
-// Replace this scaffold with the package's real implementation.
+// # The actor
+//
+// An Actor names who a request is for. Subject is the effective user, the one
+// authorization evaluates as. Impersonator is the admin acting as Subject, and
+// is empty when nobody is impersonating; RealUser returns whichever person is
+// actually at the keyboard, for audit. Tenant and Session ride along as they
+// are. The edge sets the actor once, with WithActor, after it has
+// authenticated the user; everything after that reads it with FromContext.
+//
+// # Hops
+//
+// The client interceptors (UnaryClientInterceptor, StreamClientInterceptor)
+// write the context actor to outgoing metadata under MetadataKey. The server
+// interceptors (UnaryServerInterceptor, StreamServerInterceptor) read it back
+// into the handler's context. A handler that calls the next service with the
+// context it was given forwards the same actor, impersonator included, with no
+// code of its own. Edge-set and forwarded actors are the same value in the
+// same context key, so no hop can forget one half of it.
+//
+// Only the context actor goes out. Actor metadata a caller wrote by hand is
+// replaced, or removed when the context has no actor, so a system call that
+// carries no user sends nothing.
+//
+// # Trust
+//
+// A server accepts the actor only when its TrustFunc says the caller is an
+// authenticated internal service allowed to forward one. The default is
+// TrustNone: a server that is not told whom to trust trusts nobody. Actor
+// metadata is always removed from the incoming metadata the handler sees, so
+// a client-supplied header can never be read by mistake. From an untrusted
+// caller it is dropped (the call is served without an actor) or, with
+// WithRejectUntrusted, refused with PermissionDenied. Edge services that face
+// clients strip; internal services reject, so an attempt is audited.
+//
+// TrustSPIFFEIDs and TrustDNSNames trust an mTLS peer by its SPIFFE ID or a
+// DNS SAN, and only when the handshake verified the client certificate.
+// Services that authenticate callers with a workload token instead (a
+// projected service-account token checked against the cluster's JWKS) write a
+// TrustFunc that reads the verified caller from the context their auth
+// interceptor fills, and install this package's interceptor after that one.
+// ForMethods and AnyOf build per-method allow-lists, so only the callers that
+// may pass an end-user actor to a method can do so.
+//
+// The actor is not signed. A signature with a shared key would add a shared
+// secret between services, and the actor's integrity already rests on the
+// authenticated channel: the trusted caller is the one vouching for it, and an
+// untrusted caller's actor is never read. An attacker who can impersonate a
+// trusted workload could sign whatever it liked, too.
+//
+// # Errors
+//
+// Refusals wrap ErrNoActor, ErrUntrustedCaller or ErrInvalidActor and convert
+// to Unauthenticated, PermissionDenied and InvalidArgument gRPC statuses.
+// Require and WithCodes attach the service's own go-apperr codes to them.
+// WithObserver reports every decision for audit or logging.
 package grpcactor
 
 /*
